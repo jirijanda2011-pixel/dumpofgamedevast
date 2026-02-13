@@ -147,6 +147,29 @@ do
         
         return closest_player;
     end;
+
+    local function is_target_visible(target_part)
+        local _, on_screen = CurrentCamera:WorldToViewportPoint(target_part.Position);
+        if not on_screen then
+            return false;
+        end;
+
+        local local_character = Players.LocalPlayer and Players.LocalPlayer.Character;
+        local exclude_instances = {target_part.Parent};
+        if local_character then
+            table.insert(exclude_instances, local_character);
+        end;
+
+        local raycast_params = RaycastParams.new();
+        raycast_params.FilterType = Enum.RaycastFilterType.Exclude;
+        raycast_params.FilterDescendantsInstances = exclude_instances;
+
+        local origin = CurrentCamera.CFrame.Position;
+        local direction = target_part.Position - origin;
+        local ray_result = Workspace:Raycast(origin, direction, raycast_params);
+
+        return ray_result == nil;
+    end;
     
     -- Hook bullet spawn for silent aim
     local old_spawn = exe_map[_G.exe_func_t.SPAWN_FPV_SOL_BULLET];
@@ -167,6 +190,7 @@ do
         
         local target = get_closest_player();
         if not target then return end;
+        if not is_target_visible(target.part) then return end;
         
         -- Trigger shoot (simulate mouse click)
         AutofireConfig.LastShot = currentTime;
