@@ -4,283 +4,337 @@ local CurrentCamera = Workspace.CurrentCamera;
 local RunService = game:GetService("RunService");
 local UserInputService = game:GetService("UserInputService");
 
--- 🔥 CHAMS CONFIG 🔥
-local ChamsConfig = {
+-- 🔥 SKELETON ESP CONFIG 🔥
+local SkeletonConfig = {
     Enabled = true,
-    FillColor = Color3.fromRGB(255, 0, 0),
-    OutlineColor = Color3.fromRGB(255, 255, 255),
-    FillTransparency = 0.5,
-    OutlineTransparency = 0,
     TeamCheck = true,
+    Color = Color3.fromRGB(255, 80, 80),
+    Thickness = 1.5,
+    Transparency = 1,
+    MaxDistance = 1200,
+};
+
+-- 🔥 AIMBOT CONFIG 🔥
+local AimbotConfig = {
+    Enabled = true,
+    TeamCheck = true,
+    MaxDistance = 500,
+    FovRadius = 240,
+    Smoothness = 0.2,
 };
 
 -- 🔥 AUTOFIRE CONFIG 🔥
 local AutofireConfig = {
     Enabled = true,
-    Delay = 0.1, -- Delay between shots
-    MaxDistance = 500, -- Max range to autofire
+    Delay = 0.1,
+    MaxDistance = 500,
     LastShot = 0,
 };
 
--- 🔥 CHAMS SYSTEM 🔥
-local ChamsObjects = {};
+local SkeletonLines = {};
+local SkeletonPairs = {
+    {"Head", "UpperTorso"},
+    {"UpperTorso", "LowerTorso"},
+    {"UpperTorso", "LeftUpperArm"},
+    {"LeftUpperArm", "LeftLowerArm"},
+    {"LeftLowerArm", "LeftHand"},
+    {"UpperTorso", "RightUpperArm"},
+    {"RightUpperArm", "RightLowerArm"},
+    {"RightLowerArm", "RightHand"},
+    {"LowerTorso", "LeftUpperLeg"},
+    {"LeftUpperLeg", "LeftLowerLeg"},
+    {"LeftLowerLeg", "LeftFoot"},
+    {"LowerTorso", "RightUpperLeg"},
+    {"RightUpperLeg", "RightLowerLeg"},
+    {"RightLowerLeg", "RightFoot"},
+};
 
-local function CreateChams(player_id, character)
-    if ChamsObjects[player_id] then return end;
-    
-    local highlight = Instance.new("Highlight");
-    highlight.Name = "EnemyChams_" .. player_id;
-    highlight.FillColor = ChamsConfig.FillColor;
-    highlight.OutlineColor = ChamsConfig.OutlineColor;
-    highlight.FillTransparency = ChamsConfig.FillTransparency;
-    highlight.OutlineTransparency = ChamsConfig.OutlineTransparency;
-    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop;
-    highlight.Enabled = true;
-    highlight.Parent = character;
-    
-    ChamsObjects[player_id] = highlight;
-end;
+local function create_skeleton_lines(player_id)
+    if SkeletonLines[player_id] then return end;
 
-local function RemoveChams(player_id)
-    if ChamsObjects[player_id] then
-        ChamsObjects[player_id]:Destroy();
-        ChamsObjects[player_id] = nil;
+    SkeletonLines[player_id] = {};
+    for _ = 1, #SkeletonPairs do
+        local line = Drawing.new("Line");
+        line.Visible = false;
+        line.Color = SkeletonConfig.Color;
+        line.Thickness = SkeletonConfig.Thickness;
+        line.Transparency = SkeletonConfig.Transparency;
+        SkeletonLines[player_id][#SkeletonLines[player_id] + 1] = line;
     end;
 end;
 
-local function UpdateChams()
-    if not ChamsConfig.Enabled then
-        for player_id, highlight in pairs(ChamsObjects) do
-            highlight.Enabled = false;
-        end;
-        return;
+local function remove_skeleton_lines(player_id)
+    local lines = SkeletonLines[player_id];
+    if not lines then return end;
+
+    for _, line in ipairs(lines) do
+        line:Remove();
     end;
-    
+
+    SkeletonLines[player_id] = nil;
+end;
+
+local function hide_skeleton_lines(player_id)
+    local lines = SkeletonLines[player_id];
+    if not lines then return end;
+
+    for _, line in ipairs(lines) do
+        line.Visible = false;
+    end;
+end;
+
+local function get_globals()
     local _G = getrenv()._G;
     local globals = _G.globals;
-    local cli_state = globals.cli_state;
-    local sol_teams = globals.sol_teams;
-    local soldiers_spawned = globals.soldiers_spawned;
-    local soldiers_alive = globals.soldiers_alive;
-    local soldier_models = globals.soldier_models;
-    
+
+    return _G, globals, globals.cli_state, globals.sol_teams, globals.soldiers_spawned, globals.soldiers_alive, globals.soldier_models;
+end;
+
+local function is_target_visible(target_part)
+    local _, on_screen = CurrentCamera:WorldToViewportPoint(target_part.Position);
+    if not on_screen then
+        return false;
+    end;
+
+    local local_character = Players.LocalPlayer and Players.LocalPlayer.Character;
+    local exclude_instances = {target_part.Parent};
+    if local_character then
+        table.insert(exclude_instances, local_character);
+    end;
+
+    local raycast_params = RaycastParams.new();
+    raycast_params.FilterType = Enum.RaycastFilterType.Exclude;
+    raycast_params.FilterDescendantsInstances = exclude_instances;
+
+    local origin = CurrentCamera.CFrame.Position;
+    local direction = target_part.Position - origin;
+    local ray_result = Workspace:Raycast(origin, direction, raycast_params);
+
+    return ray_result == nil;
+end;
+
+local function get_best_target(require_visible, max_distance, fov_radius)
+    local _, _, cli_state, sol_teams, soldiers_spawned, soldiers_alive, soldier_models = get_globals();
+
     local fpv_id = cli_state.fpv_sol_id;
     local local_team = sol_teams[fpv_id];
-    
-    -- Clean up old chams
-    for player_id, highlight in pairs(ChamsObjects) do
-        if not soldiers_spawned[player_id] or not soldiers_alive[player_id] then
-            RemoveChams(player_id);
-        end;
-    end;
-    
-    -- Create/update chams
+    local viewport_center = Vector2.new(CurrentCamera.ViewportSize.X * 0.5, CurrentCamera.ViewportSize.Y * 0.5);
+    local closest_player;
+    local closest_score = math.huge;
+
     for player_id, spawned in pairs(soldiers_spawned) do
-        if spawned and soldiers_alive[player_id] and player_id ~= fpv_id then
-            -- Team check
-            if ChamsConfig.TeamCheck and sol_teams[player_id] == local_team then
-                RemoveChams(player_id);
-                continue;
-            end;
-            
+        local same_team = sol_teams[player_id] == local_team;
+        if spawned and soldiers_alive[player_id] and player_id ~= fpv_id and (not AimbotConfig.TeamCheck or not same_team) then
             local character = soldier_models[player_id];
             if character and character.PrimaryPart then
-                if not ChamsObjects[player_id] then
-                    CreateChams(player_id, character);
-                end;
-                
-                local highlight = ChamsObjects[player_id];
-                if highlight then
-                    highlight.Enabled = true;
-                    highlight.FillColor = ChamsConfig.FillColor;
-                    highlight.OutlineColor = ChamsConfig.OutlineColor;
-                    highlight.FillTransparency = ChamsConfig.FillTransparency;
-                    highlight.OutlineTransparency = ChamsConfig.OutlineTransparency;
-                end;
-            end;
-        else
-            RemoveChams(player_id);
-        end;
-    end;
-end;
+                local aim_part = character:FindFirstChild("Head") or character.PrimaryPart;
+                local world_distance = (aim_part.Position - CurrentCamera.CFrame.Position).Magnitude;
 
--- 🔥 SILENT AIM + AUTOFIRE 🔥
-do
-    local _G = getrenv()._G;
-    local globals = _G.globals;
-    local exe_map = debug.getupvalues(_G.append_exe_set)[1];
-    
-    local cli_state = globals.cli_state;
-    local sol_teams = globals.sol_teams;
-    local soldiers_spawned = globals.soldiers_spawned;
-    local soldiers_alive = globals.soldiers_alive;
-    local soldier_models = globals.soldier_models;
-    
-    local function get_closest_player()
-        local closest_player;
-        local closest_distance = math.huge;
-        local fpv_id = cli_state.fpv_sol_id;
-        local team = sol_teams[fpv_id];
-        
-        for player_id, spawned in pairs(soldiers_spawned) do
-            if spawned and soldiers_alive[player_id] and player_id ~= fpv_id and sol_teams[player_id] ~= team then
-                local character = soldier_models[player_id];
-                if character and character.PrimaryPart then
-                    local head = character:FindFirstChild("Head") or character.PrimaryPart;
-                    local distance = (head.Position - CurrentCamera.CFrame.Position).Magnitude;
-                    
-                    -- Check autofire max distance
-                    if AutofireConfig.Enabled and distance <= AutofireConfig.MaxDistance then
-                        if distance < closest_distance then
-                            closest_distance = distance;
-                            closest_player = {part = head, distance = distance};
-                        end;
-                    elseif not AutofireConfig.Enabled then
-                        if distance < closest_distance then
-                            closest_distance = distance;
-                            closest_player = {part = head, distance = distance};
+                if world_distance <= max_distance then
+                    local screen_pos, on_screen = CurrentCamera:WorldToViewportPoint(aim_part.Position);
+                    if on_screen then
+                        local delta = Vector2.new(screen_pos.X, screen_pos.Y) - viewport_center;
+                        local screen_distance = delta.Magnitude;
+
+                        if screen_distance <= fov_radius then
+                            if (not require_visible) or is_target_visible(aim_part) then
+                                if screen_distance < closest_score then
+                                    closest_score = screen_distance;
+                                    closest_player = {
+                                        part = aim_part,
+                                        character = character,
+                                        distance = world_distance,
+                                        screen = Vector2.new(screen_pos.X, screen_pos.Y),
+                                    };
+                                end;
+                            end;
                         end;
                     end;
                 end;
             end;
         end;
-        
-        return closest_player;
     end;
-    
-    -- Hook bullet spawn for silent aim
-    local old_spawn = exe_map[_G.exe_func_t.SPAWN_FPV_SOL_BULLET];
-    exe_map[_G.exe_func_t.SPAWN_FPV_SOL_BULLET] = function(bullet_id, bullet_type, spawn_pos, velocity)
-        local target = get_closest_player();
-        if target then
-            velocity = (target.part.Position - spawn_pos).Unit * velocity.Magnitude;
+
+    return closest_player;
+end;
+
+local function update_skeleton_esp()
+    local _, _, cli_state, sol_teams, soldiers_spawned, soldiers_alive, soldier_models = get_globals();
+
+    if not SkeletonConfig.Enabled then
+        for player_id in pairs(SkeletonLines) do
+            hide_skeleton_lines(player_id);
         end;
-        return old_spawn(bullet_id, bullet_type, spawn_pos, velocity);
+        return;
     end;
-    
-    -- 🔥 AUTOFIRE SYSTEM 🔥
-    local function TryAutofire()
-        if not AutofireConfig.Enabled then return end;
-        
-        local currentTime = tick();
-        if currentTime - AutofireConfig.LastShot < AutofireConfig.Delay then return end;
-        
-        local target = get_closest_player();
-        if not target then return end;
-        
-        -- Trigger shoot (simulate mouse click)
-        AutofireConfig.LastShot = currentTime;
-        
-        -- Try to find and call the shoot function
-        pcall(function()
-            -- Method 1: Simulate mouse click
-            mouse1click();
-        end);
-        
-        -- Method 2: Try to find shoot remote/function
-        pcall(function()
-            if exe_map[_G.exe_func_t.FIRE_WEAPON] then
-                exe_map[_G.exe_func_t.FIRE_WEAPON]();
+
+    local fpv_id = cli_state.fpv_sol_id;
+    local local_team = sol_teams[fpv_id];
+
+    for player_id in pairs(SkeletonLines) do
+        if not soldiers_spawned[player_id] or not soldiers_alive[player_id] then
+            remove_skeleton_lines(player_id);
+        end;
+    end;
+
+    for player_id, spawned in pairs(soldiers_spawned) do
+        local enemy_valid = spawned and soldiers_alive[player_id] and player_id ~= fpv_id;
+        if not enemy_valid then
+            hide_skeleton_lines(player_id);
+            continue;
+        end;
+
+        if SkeletonConfig.TeamCheck and sol_teams[player_id] == local_team then
+            hide_skeleton_lines(player_id);
+            continue;
+        end;
+
+        local character = soldier_models[player_id];
+        if not character or not character.PrimaryPart then
+            hide_skeleton_lines(player_id);
+            continue;
+        end;
+
+        if (character.PrimaryPart.Position - CurrentCamera.CFrame.Position).Magnitude > SkeletonConfig.MaxDistance then
+            hide_skeleton_lines(player_id);
+            continue;
+        end;
+
+        create_skeleton_lines(player_id);
+        local lines = SkeletonLines[player_id];
+
+        for index, pair in ipairs(SkeletonPairs) do
+            local part_a = character:FindFirstChild(pair[1]);
+            local part_b = character:FindFirstChild(pair[2]);
+            local line = lines[index];
+
+            if part_a and part_b then
+                local point_a, visible_a = CurrentCamera:WorldToViewportPoint(part_a.Position);
+                local point_b, visible_b = CurrentCamera:WorldToViewportPoint(part_b.Position);
+
+                if visible_a and visible_b then
+                    line.Color = SkeletonConfig.Color;
+                    line.Thickness = SkeletonConfig.Thickness;
+                    line.Transparency = SkeletonConfig.Transparency;
+                    line.From = Vector2.new(point_a.X, point_a.Y);
+                    line.To = Vector2.new(point_b.X, point_b.Y);
+                    line.Visible = true;
+                else
+                    line.Visible = false;
+                end;
+            else
+                line.Visible = false;
             end;
-        end);
-        
-        -- Method 3: Virtual input
-        pcall(function()
-            local VirtualInputManager = game:GetService("VirtualInputManager");
-            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0);
-            task.wait(0.01);
-            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0);
-        end);
-    end;
-    
-    -- Autofire loop
-    RunService.Heartbeat:Connect(function()
-        if AutofireConfig.Enabled then
-            TryAutofire();
         end;
+    end;
+end;
+
+local function run_aimbot()
+    if not AimbotConfig.Enabled then return end;
+
+    local target = get_best_target(true, AimbotConfig.MaxDistance, AimbotConfig.FovRadius);
+    if not target then return end;
+
+    local viewport_center = Vector2.new(CurrentCamera.ViewportSize.X * 0.5, CurrentCamera.ViewportSize.Y * 0.5);
+    local delta = target.screen - viewport_center;
+
+    local move_x = delta.X * AimbotConfig.Smoothness;
+    local move_y = delta.Y * AimbotConfig.Smoothness;
+
+    if math.abs(move_x) < 0.5 and math.abs(move_y) < 0.5 then
+        return;
+    end;
+
+    pcall(function()
+        mousemoverel(move_x, move_y);
     end);
 end;
 
--- 🔥 CHAMS UPDATE LOOP 🔥
-RunService.RenderStepped:Connect(UpdateChams);
+local function try_autofire()
+    if not AutofireConfig.Enabled then return end;
 
--- 🔥 KEYBINDS 🔥
+    local current_time = tick();
+    if current_time - AutofireConfig.LastShot < AutofireConfig.Delay then return end;
+
+    local target = get_best_target(true, AutofireConfig.MaxDistance, AimbotConfig.FovRadius);
+    if not target then return end;
+
+    AutofireConfig.LastShot = current_time;
+
+    pcall(function()
+        mouse1click();
+    end);
+
+    pcall(function()
+        local VirtualInputManager = game:GetService("VirtualInputManager");
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0);
+        task.wait(0.01);
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0);
+    end);
+end;
+
+RunService.RenderStepped:Connect(function()
+    update_skeleton_esp();
+    run_aimbot();
+end);
+
+RunService.Heartbeat:Connect(function()
+    try_autofire();
+end);
+
 UserInputService.InputBegan:Connect(function(input, processed)
     if processed then return end;
-    
+
     if input.KeyCode == Enum.KeyCode.Insert then
-        ChamsConfig.Enabled = not ChamsConfig.Enabled;
-        print("🌟 Chams:", ChamsConfig.Enabled and "✅ ON" or "❌ OFF");
-        
+        SkeletonConfig.Enabled = not SkeletonConfig.Enabled;
+        print("🦴 Skeleton ESP:", SkeletonConfig.Enabled and "✅ ON" or "❌ OFF");
+
     elseif input.KeyCode == Enum.KeyCode.Home then
         AutofireConfig.Enabled = not AutofireConfig.Enabled;
         print("🔥 Autofire:", AutofireConfig.Enabled and "✅ ON" or "❌ OFF");
-        
+
     elseif input.KeyCode == Enum.KeyCode.End then
-        ChamsConfig.TeamCheck = not ChamsConfig.TeamCheck;
-        print("👥 Team Check:", ChamsConfig.TeamCheck and "✅ ON" or "❌ OFF");
-        
+        AimbotConfig.Enabled = not AimbotConfig.Enabled;
+        print("🎯 Aimbot:", AimbotConfig.Enabled and "✅ ON" or "❌ OFF");
+
     elseif input.KeyCode == Enum.KeyCode.PageUp then
-        -- Cycle chams color
-        local colors = {
-            {name = "Red", fill = Color3.fromRGB(255, 0, 0)},
-            {name = "Green", fill = Color3.fromRGB(0, 255, 0)},
-            {name = "Blue", fill = Color3.fromRGB(0, 100, 255)},
-            {name = "Purple", fill = Color3.fromRGB(255, 0, 255)},
-            {name = "Yellow", fill = Color3.fromRGB(255, 255, 0)},
-        };
-        
-        local currentColor = ChamsConfig.FillColor;
-        local nextIndex = 1;
-        
-        for i, color in ipairs(colors) do
-            if color.fill == currentColor then
-                nextIndex = (i % #colors) + 1;
-                break;
-            end;
-        end;
-        
-        ChamsConfig.FillColor = colors[nextIndex].fill;
-        print("🎨 Chams Color:", colors[nextIndex].name);
-        
+        AimbotConfig.Smoothness = math.clamp(AimbotConfig.Smoothness + 0.05, 0.05, 1);
+        print("🖱️ Aimbot Smoothness:", string.format("%.2f", AimbotConfig.Smoothness));
+
     elseif input.KeyCode == Enum.KeyCode.PageDown then
-        -- Adjust autofire delay
         AutofireConfig.Delay = AutofireConfig.Delay + 0.05;
         if AutofireConfig.Delay > 0.5 then
             AutofireConfig.Delay = 0.05;
         end;
-        print("⏱️ Autofire Delay:", AutofireConfig.Delay .. "s");
+        print("⏱️ Autofire Delay:", string.format("%.2fs", AutofireConfig.Delay));
     end;
 end);
 
--- 🔥 CLEANUP ON DEATH 🔥
+local function cleanup_esp()
+    for player_id in pairs(SkeletonLines) do
+        remove_skeleton_lines(player_id);
+    end;
+end;
+
 local LocalPlayer = Players.LocalPlayer;
 if LocalPlayer.Character then
-    LocalPlayer.Character:WaitForChild("Humanoid").Died:Connect(function()
-        for player_id, highlight in pairs(ChamsObjects) do
-            RemoveChams(player_id);
-        end;
-    end);
+    LocalPlayer.Character:WaitForChild("Humanoid").Died:Connect(cleanup_esp);
 end;
 
 LocalPlayer.CharacterAdded:Connect(function(character)
-    character:WaitForChild("Humanoid").Died:Connect(function()
-        for player_id, highlight in pairs(ChamsObjects) do
-            RemoveChams(player_id);
-        end;
-    end);
+    character:WaitForChild("Humanoid").Died:Connect(cleanup_esp);
 end);
 
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-print("🎯 SILENT AIM + CHAMS + AUTOFIRE!");
+print("🎯 MOUSE AIMBOT + SKELETON ESP + AUTOFIRE");
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-print("✅ Silent Aim: Always active");
-print("✅ Chams: Highlight enemies");
-print("✅ Autofire: Shoots automatically");
+print("✅ Aimbot: mousemoverel legit aim");
+print("✅ Skeleton ESP: enemy bones");
+print("✅ Autofire: visible targets only");
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-print("INSERT: Toggle Chams");
+print("INSERT: Toggle Skeleton ESP");
 print("HOME: Toggle Autofire");
-print("END: Toggle Team Check");
-print("PAGE UP: Change Chams Color");
+print("END: Toggle Aimbot");
+print("PAGE UP: Increase Aimbot Smoothness");
 print("PAGE DOWN: Adjust Autofire Delay");
 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
